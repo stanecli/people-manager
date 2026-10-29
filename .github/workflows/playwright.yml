@@ -1,0 +1,151 @@
+name: Preview UI tests
+
+on:
+  repository_dispatch:
+    # Vercel currently emits ready for completed previews. Its testing guide
+    # also documents success; accept either, then explicitly filter previews.
+    types: [vercel.deployment.ready, vercel.deployment.success]
+
+permissions: {}
+
+# Serialize repeated events for one deployed commit so an older run cannot
+# overwrite a newer run's commit status. Different commits run independently.
+concurrency:
+  group: preview-ui-${{ github.event.client_payload.project.id }}-${{ github.event.client_payload.git.sha }}
+  cancel-in-progress: false
+
+jobs:
+  deployment:
+    name: Validate PR preview
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      should_test: ${{ steps.deployment.outputs.should_test }}
+      sha: ${{ steps.deployment.outputs.sha }}
+      base_url: ${{ steps.deployment.outputs.base_url }}
+    steps:
+      - name: Verify deployment and mark its commit pending
+        id: deployment
+        uses: actions/github-script@v8
+        env:
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+          PRODUCTION_BRANCH: ${{ vars.PRODUCTION_BRANCH || 'master' }}
+        with:
+          script: |
+            core.setOutput('should_test', 'false');
+            const payload = context.payload.client_payload;
+            if (payload?.environment !== 'preview') {
+              core.info('Only preview deployments are tested.');
+              return;
+            }
+            const projectId = process.env.VERCEL_PROJECT_ID;
+            if (!projectId) throw new Error('Set the VERCEL_PROJECT_ID repository variable.');
+            if (payload.project?.id !== projectId) {
+              core.info('Ignoring a deployment from another Vercel project.');
+              return;
+            }
+            const sha = payload.git?.sha;
+            if (typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) {
+              throw new Error('The deployment must identify an exact Git commit SHA.');
+            }
+            const url = new URL(payload.url);
+            if (url.protocol !== 'https:' || !url.hostname.endsWith('.vercel.app') ||
+                url.username || url.password || url.port ||
+                url.pathname !== '/' || url.search || url.hash) {
+              throw new Error('Expected an HTTPS Vercel deployment URL without a path or credentials.');
+            }
+            const repository = `${context.repo.owner}/${context.repo.repo}`.toLowerCase();
+            const pulls = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+              ...context.repo,
+              commit_sha: sha,
+              per_page: 100,
+            });
+            const pull = pulls.find((candidate) =>
+              candidate.state === 'open' && candidate.head.sha === sha &&
+              candidate.base.ref === process.env.PRODUCTION_BRANCH &&
+              candidate.base.repo.full_name.toLowerCase() === repository &&
+              candidate.head.repo?.full_name.toLowerCase() === repository
+            );
+            if (!pull) {
+              core.info('No current, same-repository PR head targets the production branch.');
+              return;
+            }
+            core.setOutput('should_test', 'true');
+            core.setOutput('sha', sha);
+            core.setOutput('base_url', url.origin);
+            await github.rest.repos.createCommitStatus({
+              ...context.repo,
+              sha,
+              state: 'pending',
+              context: 'People Manager UI',
+              description: `Testing preview for PR #${pull.number}`,
+              target_url: `${process.env.GITHUB_SERVER_URL}/${repository}/actions/runs/${context.runId}`,
+            });
+
+  test:
+    name: Chromium against deployed commit
+    needs: deployment
+    if: needs.deployment.outputs.should_test == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CI: 'true'
+      BASE_URL: ${{ needs.deployment.outputs.base_url }}
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.deployment.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Install Chromium and system dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Run the real-backend UI suite
+        run: npm run test:e2e
+      - name: Publish HTML report and failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: playwright-${{ needs.deployment.outputs.sha }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
+          if-no-files-found: warn
+
+  result:
+    name: Report tested commit status
+    needs: [deployment, test]
+    if: ${{ always() && needs.deployment.outputs.should_test == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Finish the merge-gating status
+        uses: actions/github-script@v8
+        env:
+          DEPLOYED_SHA: ${{ needs.deployment.outputs.sha }}
+          TEST_RESULT: ${{ needs.test.result }}
+        with:
+          script: |
+            const passed = process.env.TEST_RESULT === 'success';
+            await github.rest.repos.createCommitStatus({
+              ...context.repo,
+              sha: process.env.DEPLOYED_SHA,
+              state: passed ? 'success' : 'failure',
+              context: 'People Manager UI',
+              description: passed ? 'Chromium UI tests passed' : 'Preview UI tests did not pass',
+              target_url: `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });

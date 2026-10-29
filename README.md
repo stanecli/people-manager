@@ -2,7 +2,13 @@
 
 A small application for managing people, with persistent storage, anonymous ownership, and CSV export.
 
-This README describes the agreed architecture and intended behavior. Application code and deployment have not been created as part of this design document.
+This repository implements the architecture and behavior below. Hosted services are configured manually; follow the [setup and verification guide](docs/setup.md) to connect Supabase, run the tests, and enable Vercel previews and the required merge status.
+
+## Quick start
+
+Use Node.js 24. Run `npm ci`, configure Supabase using [`supabase/setup.sql`](supabase/setup.sql), and copy `.env.example` to `.env.local` with the project's public URL and publishable key. Then run `npm run dev`.
+
+Run `npm run build` and `npm run lint` for local checks. `npm run test:local` runs intercepted browser checks without a backend; `npm run test:backend` and `npm run test:e2e` require the configured Supabase project. See the [setup guide](docs/setup.md) for browser installation, deployment testing, and CI configuration.
 
 ## Scope
 
@@ -18,9 +24,11 @@ Each visitor owns a private collection of people. A person has a name, email add
 | Reload | Restore the owner's list and reload the selected saved record when a selection is present. Unsaved changes are discarded. |
 | Export | Download all the owner's saved people as a CSV containing Name, Email, and Age. |
 
-To preserve the original requirement to restore the same form after a reload, the selected saved record ID is represented in a URL query parameter. Selection is navigation state; personal field values remain in the database. An absent or unavailable selection leaves a blank form. Starting a new draft clears the selection parameter.
+To preserve the original requirement to restore the same form after a reload, the selected saved record ID is represented in the `?person=<uuid>` URL query parameter. Selection is navigation state; personal field values remain in the database. An absent or unavailable selection leaves a blank form. Starting a new draft clears the selection parameter.
 
 For this assignment, switching records or starting a new draft discards unsaved edits. These are explicit behavior assumptions, without an additional draft recovery workflow.
+
+Save and Delete temporarily disable form editing, record selection, and starting a new draft. Delete acts immediately, without a confirmation dialog. Export and writes cannot run at the same time, keeping a paginated export consistent within the active tab.
 
 ## Technology choices
 
@@ -66,6 +74,8 @@ The `people` table contains multiple records per owner.
 The length and age limits are assignment assumptions. Names and emails need not be unique. Email is record data and does not authenticate the owner.
 
 Input validation checks the required fields, email format, and age range. Database constraints enforce the required values, lengths, and integer range as the persistence boundary.
+
+Names and emails are trimmed before validation and saving; case is preserved. A blank age is invalid and is not converted to zero.
 
 ## Anonymous ownership
 
