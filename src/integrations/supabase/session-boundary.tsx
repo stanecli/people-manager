@@ -3,9 +3,7 @@ import { ErrorNotice, Loading } from "@/components/feedback";
 import { WelcomePanel } from "@/components/welcome-panel";
 import { useAnonymousSession } from "./session";
 
-const PeoplePage = lazy(() =>
-    import("@/features/people/people-page").then((module) => ({ default: module.PeoplePage })),
-);
+const PeoplePage = lazy(() => import("@/pages/people-page").then((module) => ({ default: module.PeoplePage })));
 
 export default function SessionBoundary() {
     const { state, retry } = useAnonymousSession();

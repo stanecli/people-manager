@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { deferred, exportRows, fillPerson, savePerson } from "../support/app";
+import { csvRows, deferred, exportRows, fillPerson, savePerson } from "../support/app";
 import { jsonResponse, mockOrigin, mockPerson, mockSupabase } from "../support/mock-supabase";
 
 const ada = { name: "Ada Lovelace", email: "ada@example.com", age: 36 };
@@ -316,6 +316,72 @@ test("failed deletion retains the record and form until a successful retry", asy
     await page.getByRole("button", { name: "Delete person", exact: true }).click();
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
     expect(backend.people.size).toBe(0);
+});
+
+test("pending export blocks data actions while editing, New, selection, and history remain usable", async ({ page }) => {
+    const first = mockPerson(ada.name, 1, ada);
+    const second = mockPerson(grace.name, 2, grace);
+    const backend = await mockSupabase(page, [first, second]);
+    const entered = deferred();
+    const release = deferred();
+    let downloads = 0;
+    page.on("download", () => {
+        downloads += 1;
+    });
+    await page.route(peopleRoute, async (route) => {
+        const url = new URL(route.request().url());
+        if (
+            route.request().method() !== "GET" ||
+            !(url.searchParams.get("select") || "").includes("email") ||
+            url.searchParams.has("id")
+        ) {
+            return route.fallback();
+        }
+        entered.resolve();
+        await release.promise;
+        await route.fallback();
+    });
+    await page.goto("/");
+    await page.getByRole("link", { name: first.name, exact: true }).click();
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue(first.name);
+    const download = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export CSV", exact: true }).click();
+    try {
+        await entered.promise;
+        await expect(page.getByRole("button", { name: "Exporting…", exact: true })).toBeDisabled();
+        for (const button of ["Save person", "Delete person"])
+            await expect(page.getByRole("button", { name: button, exact: true })).toBeDisabled();
+        for (const label of ["Name", "Email", "Age"])
+            await expect(page.getByLabel(label, { exact: true })).toBeEnabled();
+        await fillPerson(page, { name: "Unsaved edit", email: "draft@example.com", age: 40 });
+        await expect(page.getByText("Unsaved", { exact: true })).toBeVisible();
+        await expect(page.getByRole("button", { name: "New person", exact: true })).toBeEnabled();
+        await page.getByRole("button", { name: "New person", exact: true }).click();
+        await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+        await page.getByRole("link", { name: second.name, exact: true }).click();
+        await expect(page.getByLabel("Email", { exact: true })).toHaveValue(second.email);
+        await page.goBack();
+        expect(new URL(page.url()).searchParams.has("person")).toBe(false);
+        await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+        await page.goForward();
+        await expect(page).toHaveURL(new RegExp(`person=${second.id}`));
+        await expect(page.getByLabel("Name", { exact: true })).toHaveValue(second.name);
+        for (const button of ["Save person", "Delete person"])
+            await expect(page.getByRole("button", { name: button, exact: true })).toBeDisabled();
+        expect(downloads).toBe(0);
+    } finally {
+        release.resolve();
+    }
+    expect(await csvRows(await download)).toEqual([
+        ["Name", "Email", "Age"],
+        [ada.name, ada.email, String(ada.age)],
+        [grace.name, grace.email, String(grace.age)],
+    ]);
+    for (const button of ["Export CSV", "Save person", "Delete person"])
+        await expect(page.getByRole("button", { name: button, exact: true })).toBeEnabled();
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue(second.name);
+    expect(downloads).toBe(1);
+    expect(backend.writes).toHaveLength(0);
 });
 
 test("CSV fetches every saved row under a smaller server cap and excludes draft changes", async ({ page }) => {

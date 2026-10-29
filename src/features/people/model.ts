@@ -3,11 +3,10 @@ import { z } from "zod";
 export const personInputSchema = z.object({
     name: z.string().trim().min(1, "Enter a name.").max(200, "Use 200 characters or fewer."),
     email: z
-        .string()
+        .email("Enter a valid email address.")
         .trim()
         .min(1, "Enter an email address.")
-        .max(254, "Use 254 characters or fewer.")
-        .email("Enter a valid email address."),
+        .max(254, "Use 254 characters or fewer."),
     age: z
         .string()
         .trim()
